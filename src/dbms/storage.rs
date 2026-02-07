@@ -8,8 +8,12 @@ use std::{
 pub const PAGE_SIZE: usize = 8192;
 
 pub fn read_page(file: &mut File, page: u64, buf: &mut [u8; PAGE_SIZE]) -> io::Result<()> {
+    let max = file.metadata()?.len() / PAGE_SIZE as u64;
+    if page + 1 > max {
+        return Err(io::Error::other("tried to read distant page"));
+    }
     file.seek(io::SeekFrom::Start(page * PAGE_SIZE as u64))?;
-    file.read(buf).map(|_| ())
+    file.read_exact(buf).map(|_| ())
 }
 
 pub fn write_page(file: &mut File, page: u64, buf: &[u8; PAGE_SIZE]) -> io::Result<()> {
@@ -19,6 +23,15 @@ pub fn write_page(file: &mut File, page: u64, buf: &[u8; PAGE_SIZE]) -> io::Resu
     }
     file.seek(io::SeekFrom::Start(page * PAGE_SIZE as u64))?;
     file.write_all(buf).map(|_| ())
+}
+
+pub fn copy_page(file: &mut File, src: u64, dst: u64) -> io::Result<()> {
+    if src == dst {
+        return Err(io::Error::other("tried to copy page to itself"));
+    }
+    let mut buf = [0u8; PAGE_SIZE];
+    read_page(file, src, &mut buf)?;
+    write_page(file, dst, &buf)
 }
 
 #[cfg(test)]
@@ -46,6 +59,33 @@ mod tests {
     }
 
     #[test]
+    fn read_page_given_distant_page() {
+        ephemeral::file!(tmp {
+            let mut read_buffer = [0u8; PAGE_SIZE];
+            match read_page(tmp.borrow_mut(), 0, &mut read_buffer) {
+                Ok(_) => panic!("allowed reading distant page"),
+                Err(error) => assert_eq!("tried to read distant page", error.to_string()),
+            }
+        });
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[0u8; PAGE_SIZE]).unwrap();
+            let mut read_buffer = [0u8; PAGE_SIZE];
+            match read_page(tmp.borrow_mut(), 1, &mut read_buffer) {
+                Ok(_) => panic!("allowed reading distant page"),
+                Err(error) => assert_eq!("tried to read distant page", error.to_string()),
+            }
+        });
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[0u8; PAGE_SIZE]).unwrap();
+            let mut read_buffer = [0u8; PAGE_SIZE];
+            match read_page(tmp.borrow_mut(), 4, &mut read_buffer) {
+                Ok(_) => panic!("allowed reading distant page"),
+                Err(error) => assert_eq!("tried to read distant page", error.to_string()),
+            }
+        });
+    }
+
+    #[test]
     fn write_page_seeks_multiple_of_page_size() {
         ephemeral::file!(tmp {
             let write_buffer = [1u8; PAGE_SIZE];
@@ -65,20 +105,74 @@ mod tests {
     #[test]
     fn write_page_given_distant_page() {
         ephemeral::file!(tmp {
-            // Given *slightly* distant page.
             let write_buffer = [1u8; PAGE_SIZE];
             match write_page(tmp.borrow_mut(), 1, &write_buffer) {
                 Ok(_) => panic!("allowed writing distant page"),
                 Err(error) => assert_eq!("tried to write distant page", error.to_string()),
-        }
+            }
         });
         ephemeral::file!(tmp {
-            // Given *very* distant page.
             let write_buffer = [1u8; PAGE_SIZE];
             match write_page(tmp.borrow_mut(), 4, &write_buffer) {
                 Ok(_) => panic!("allowed writing distant page"),
                 Err(error) => assert_eq!("tried to write distant page", error.to_string()),
-        }
+            }
+        });
+    }
+
+    #[test]
+    fn copy_page_given_invalid_page_combination() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[0u8; PAGE_SIZE]).unwrap();
+            match copy_page(tmp.borrow_mut(), 0, 0) {
+                Ok(_) => panic!("allowed copying page to itself"),
+                Err(error) => assert_eq!("tried to copy page to itself", error.to_string()),
+            }
+        });
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[0u8; PAGE_SIZE]).unwrap();
+            match copy_page(tmp.borrow_mut(), 1, 0) {
+                Ok(_) => panic!("allowed copying from distant page"),
+                Err(error) => assert_eq!("tried to read distant page", error.to_string()),
+            }
+        });
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[0u8; PAGE_SIZE]).unwrap();
+            match copy_page(tmp.borrow_mut(), 4, 0) {
+                Ok(_) => panic!("allowed copying from distant page"),
+                Err(error) => assert_eq!("tried to read distant page", error.to_string()),
+            }
+        });
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[0u8; PAGE_SIZE]).unwrap();
+            match copy_page(tmp.borrow_mut(), 0, 2) {
+                Ok(_) => panic!("allowed copying from distant page"),
+                Err(error) => assert_eq!("tried to write distant page", error.to_string()),
+            }
+        });
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[0u8; PAGE_SIZE]).unwrap();
+            match copy_page(tmp.borrow_mut(), 0, 4) {
+                Ok(_) => panic!("allowed copying from distant page"),
+                Err(error) => assert_eq!("tried to write distant page", error.to_string()),
+            }
+        });
+    }
+
+    #[test]
+    fn copy_page_copies_from_src_to_dst() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            write_page(tmp.borrow_mut(), 1, &[2u8; PAGE_SIZE]).unwrap();
+
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 1, &mut buf).unwrap();
+            assert_eq!([2u8; PAGE_SIZE], buf);
+
+            copy_page(tmp.borrow_mut(), 0, 1).unwrap();
+
+            read_page(tmp.borrow_mut(), 1, &mut buf).unwrap();
+            assert_eq!([1u8; PAGE_SIZE], buf);
         });
     }
 }
