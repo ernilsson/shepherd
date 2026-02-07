@@ -2,7 +2,7 @@
 #[macro_export]
 macro_rules! file {
     ($name: ident $body: block) => {{
-        let mut $name = $crate::dbms::storage::ethemeral::File::new(
+        let mut $name = $crate::dbms::storage::ephemeral::File::new(
             format!(
                 "{}-{}.test",
                 module_path!().replace("::", "-"),
@@ -62,7 +62,7 @@ mod tests {
     #[allow(unused_mut)]
     fn test_macro() {
         file!(tmp {
-            assert!(tmp.path.starts_with("shepherd-dbms-storage-ethemeral"));
+            assert!(tmp.path.starts_with("shepherd-dbms-storage-ephemeral"));
         });
     }
 

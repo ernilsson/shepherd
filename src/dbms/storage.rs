@@ -1,4 +1,4 @@
-pub mod ethemeral;
+pub mod ephemeral;
 
 use std::{
     fs::File,
@@ -27,11 +27,11 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use crate::dbms::storage::{PAGE_SIZE, ethemeral};
+    use crate::dbms::storage::{PAGE_SIZE, ephemeral};
 
     #[test]
     fn read_page_seeks_multiple_of_page_size() {
-        ethemeral::file!(tmp {
+        ephemeral::file!(tmp {
             let mut write_buffer = [0u8; PAGE_SIZE * 2];
             write_buffer[0..PAGE_SIZE].copy_from_slice(&[5u8; PAGE_SIZE]);
             write_buffer[PAGE_SIZE..PAGE_SIZE*2].copy_from_slice(&[9u8; PAGE_SIZE]);
@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn write_page_seeks_multiple_of_page_size() {
-        ethemeral::file!(tmp {
+        ephemeral::file!(tmp {
             let write_buffer = [1u8; PAGE_SIZE];
             assert!(write_page(tmp.borrow_mut(), 0, &write_buffer).is_ok());
 
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn write_page_given_distant_page() {
-        ethemeral::file!(tmp {
+        ephemeral::file!(tmp {
             // Given *slightly* distant page.
             let write_buffer = [1u8; PAGE_SIZE];
             match write_page(tmp.borrow_mut(), 1, &write_buffer) {
@@ -72,7 +72,7 @@ mod tests {
                 Err(error) => assert_eq!("tried to write distant page", error.to_string()),
         }
         });
-        ethemeral::file!(tmp {
+        ephemeral::file!(tmp {
             // Given *very* distant page.
             let write_buffer = [1u8; PAGE_SIZE];
             match write_page(tmp.borrow_mut(), 4, &write_buffer) {
