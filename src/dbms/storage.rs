@@ -7,6 +7,7 @@ use std::{
 };
 
 pub const PAGE_SIZE: usize = 8192;
+const CRC_POLY: u8 = 0xB0;
 
 pub fn read_page(file: &mut File, page: u64, buf: &mut [u8; PAGE_SIZE]) -> io::Result<()> {
     let max = file.metadata()?.len() / PAGE_SIZE as u64;
@@ -33,6 +34,17 @@ pub fn copy_page(file: &mut File, src: u64, dst: u64) -> io::Result<()> {
     let mut buf = [0u8; PAGE_SIZE];
     read_page(file, src, &mut buf)?;
     write_page(file, dst, &buf)
+}
+
+pub fn write_meta(file: &mut File, pair: (u64, u64), buf: &[u8; PAGE_SIZE - 1]) -> io::Result<()> {
+    copy_page(file, pair.0, pair.1)?;
+    // Ensure that the backup has reached the storage medium before continuing.
+    file.sync_all()?;
+
+    let mut page = [0u8; PAGE_SIZE];
+    page[0..PAGE_SIZE - 1].copy_from_slice(buf);
+    page[PAGE_SIZE - 1] = integrity::crc(CRC_POLY, buf);
+    write_page(file, pair.0, &page)
 }
 
 #[cfg(test)]
@@ -174,6 +186,54 @@ mod tests {
 
             read_page(tmp.borrow_mut(), 1, &mut buf).unwrap();
             assert_eq!([1u8; PAGE_SIZE], buf);
+        });
+    }
+
+    #[test]
+    fn write_meta_when_backup_fails() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            // Making the backup page a distant page forces an error.
+            match write_meta(tmp.borrow_mut(), (0, 2), &[0u8; PAGE_SIZE-1]) {
+                Ok(_) => panic!("allowed backup page failure"),
+                Err(error) => assert_eq!("tried to write distant page", error.to_string()),
+            }
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            assert_eq!([1u8; PAGE_SIZE], buf);
+        });
+    }
+
+    #[test]
+    fn write_meta_when_main_fails() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            // Making the main page a distant page forces an error.
+            match write_meta(tmp.borrow_mut(), (2, 0), &[0u8; PAGE_SIZE-1]) {
+                Ok(_) => panic!("allowed main page failure"),
+                Err(error) => assert_eq!("tried to read distant page", error.to_string()),
+            }
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            assert_eq!([1u8; PAGE_SIZE], buf);
+        });
+    }
+
+    #[test]
+    fn write_meta_without_errors() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            write_page(tmp.borrow_mut(), 1, &[2u8; PAGE_SIZE]).unwrap();
+
+            write_meta(tmp.borrow_mut(), (1, 0), &[3u8; PAGE_SIZE-1]).unwrap();
+
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            assert_eq!([2u8; PAGE_SIZE], buf);
+
+            read_page(tmp.borrow_mut(), 1, &mut buf).unwrap();
+            assert_eq!(buf[0..PAGE_SIZE-1], [3u8; PAGE_SIZE-1]);
+            assert_eq!(integrity::crc(CRC_POLY, &buf[0..PAGE_SIZE-1]), buf[PAGE_SIZE-1]);
         });
     }
 }
