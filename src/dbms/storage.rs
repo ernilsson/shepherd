@@ -1,4 +1,5 @@
 pub mod ephemeral;
+mod integrity;
 
 use std::{
     fs::File,
