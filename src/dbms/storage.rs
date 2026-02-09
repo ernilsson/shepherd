@@ -47,6 +47,25 @@ pub fn write_meta(file: &mut File, pair: (u64, u64), buf: &[u8; PAGE_SIZE - 1]) 
     write_page(file, pair.0, &page)
 }
 
+pub fn read_meta(
+    file: &mut File,
+    pair: (u64, u64),
+    buf: &mut [u8; PAGE_SIZE - 1],
+) -> io::Result<()> {
+    let mut page = [0u8; PAGE_SIZE];
+    read_page(file, pair.0, &mut page)?;
+    if page[PAGE_SIZE - 1] != integrity::crc(CRC_POLY, &page[0..PAGE_SIZE - 1]) {
+        // The calculated CRC is different from the stored CRC. It does not
+        // matter what has gone wrong at this point, just that the backup data
+        // should take the place of the main data.
+        read_page(file, pair.1, &mut page)?;
+        page[PAGE_SIZE - 1] = integrity::crc(CRC_POLY, &page[0..PAGE_SIZE - 1]);
+        write_page(file, pair.0, &page)?;
+    }
+    buf.copy_from_slice(&page[0..PAGE_SIZE - 1]);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use core::panic;
@@ -234,6 +253,56 @@ mod tests {
             read_page(tmp.borrow_mut(), 1, &mut buf).unwrap();
             assert_eq!(buf[0..PAGE_SIZE-1], [3u8; PAGE_SIZE-1]);
             assert_eq!(integrity::crc(CRC_POLY, &buf[0..PAGE_SIZE-1]), buf[PAGE_SIZE-1]);
+        });
+    }
+
+    #[test]
+    fn read_meta_when_main_is_corrupt() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            write_meta(tmp.borrow_mut(), (0, 1), &[2u8; PAGE_SIZE-1]).unwrap();
+            // Overwrite the CRC error detection code at the end of the page.
+            write_page(tmp.borrow_mut(), 0, &[4u8; PAGE_SIZE]).unwrap();
+
+            let mut buf = [0u8; PAGE_SIZE-1];
+            read_meta(tmp.borrow_mut(), (0, 1), &mut buf).unwrap();
+            assert_eq!([1u8; PAGE_SIZE-1], buf);
+            // Make sure the backup data is written to the main page.
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            assert_eq!([1u8; PAGE_SIZE-1], buf[0..PAGE_SIZE-1]);
+            assert_eq!(integrity::crc(CRC_POLY, &buf[0..PAGE_SIZE-1]), buf[PAGE_SIZE-1]);
+        });
+
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            write_meta(tmp.borrow_mut(), (0, 1), &[2u8; PAGE_SIZE-1]).unwrap();
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            // Single byte corruption.
+            buf[0] = !buf[0];
+            write_page(tmp.borrow_mut(), 0, &buf).unwrap();
+
+            let mut buf = [0u8; PAGE_SIZE-1];
+            read_meta(tmp.borrow_mut(), (0, 1), &mut buf).unwrap();
+            assert_eq!([1u8; PAGE_SIZE-1], buf);
+            // Make sure the backup data is written to the main page.
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            assert_eq!([1u8; PAGE_SIZE-1], buf[0..PAGE_SIZE-1]);
+            assert_eq!(integrity::crc(CRC_POLY, &buf[0..PAGE_SIZE-1]), buf[PAGE_SIZE-1]);
+        });
+    }
+
+    #[test]
+    fn read_meta_when_main_is_intact() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            write_meta(tmp.borrow_mut(), (0, 1), &[2u8; PAGE_SIZE-1]).unwrap();
+
+            let mut buf = [0u8; PAGE_SIZE-1];
+            read_meta(tmp.borrow_mut(), (0, 1), &mut buf).unwrap();
+            assert_eq!([2u8; PAGE_SIZE-1], buf);
         });
     }
 }
