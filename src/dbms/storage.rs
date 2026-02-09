@@ -66,6 +66,14 @@ pub fn read_meta(
     Ok(())
 }
 
+pub fn init_meta(file: &mut File, pair: (u64, u64)) -> io::Result<()> {
+    let mut page = [0u8; PAGE_SIZE];
+    page[PAGE_SIZE - 1] = integrity::crc(CRC_POLY, &page[0..PAGE_SIZE - 1]);
+    write_page(file, pair.1, &page)?;
+    file.sync_all()?;
+    write_page(file, pair.0, &page)
+}
+
 #[cfg(test)]
 mod tests {
     use core::panic;
@@ -303,6 +311,55 @@ mod tests {
             let mut buf = [0u8; PAGE_SIZE-1];
             read_meta(tmp.borrow_mut(), (0, 1), &mut buf).unwrap();
             assert_eq!([2u8; PAGE_SIZE-1], buf);
+        });
+    }
+
+    #[test]
+    fn init_meta_when_backup_fails() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            // Making the backup page a distant page forces an error.
+            match init_meta(tmp.borrow_mut(), (0, 2)) {
+                Ok(_) => panic!("allowed meta init page failure"),
+                Err(error) => assert_eq!("tried to write distant page", error.to_string()),
+            }
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            assert_eq!([1u8; PAGE_SIZE], buf);
+        });
+    }
+
+    #[test]
+    fn init_meta_when_main_fails() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            // Making the backup page a distant page forces an error.
+            match init_meta(tmp.borrow_mut(), (2, 0)) {
+                Ok(_) => panic!("allowed meta init failure"),
+                Err(error) => assert_eq!("tried to write distant page", error.to_string()),
+            }
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            assert_eq!([0u8; PAGE_SIZE-1], buf[0..PAGE_SIZE-1]);
+            assert_eq!(integrity::crc(CRC_POLY, &[0u8; PAGE_SIZE-1]), buf[PAGE_SIZE-1]);
+        });
+    }
+
+    #[test]
+    fn init_meta_without_errors() {
+        ephemeral::file!(tmp {
+            write_page(tmp.borrow_mut(), 0, &[1u8; PAGE_SIZE]).unwrap();
+            write_page(tmp.borrow_mut(), 1, &[2u8; PAGE_SIZE]).unwrap();
+
+            init_meta(tmp.borrow_mut(), (1, 0)).unwrap();
+
+            let mut expected = [0u8; PAGE_SIZE];
+            expected[PAGE_SIZE-1] = integrity::crc(CRC_POLY, &expected[0..PAGE_SIZE-1]);
+            let mut buf = [0u8; PAGE_SIZE];
+            read_page(tmp.borrow_mut(), 0, &mut buf).unwrap();
+            assert_eq!(expected, buf);
+            read_page(tmp.borrow_mut(), 1, &mut buf).unwrap();
+            assert_eq!(expected, buf);
         });
     }
 }
