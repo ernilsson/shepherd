@@ -1,4 +1,9 @@
+use std::error;
 use std::ops::BitOr;
+
+pub enum Error {
+    BadChecksum,
+}
 
 #[derive(Debug, PartialEq)]
 enum Bit {

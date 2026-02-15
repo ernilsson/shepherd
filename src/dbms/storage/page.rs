@@ -36,7 +36,11 @@ pub fn copy(file: &mut File, src: u64, dst: u64) -> io::Result<()> {
 pub mod slot {
     use std::io;
 
+    use crate::dbms::storage::integrity;
+
     type Index = u16;
+
+    const CRC_POLY: u8 = 0x07;
 
     #[derive(Default, Copy, Clone)]
     struct Block {
@@ -67,6 +71,19 @@ pub mod slot {
             page[base..base + 2].copy_from_slice(&block.size.to_le_bytes());
             base += 2;
             page[base..base + 2].copy_from_slice(&block.offset.to_le_bytes());
+        }
+        write_checksum(page);
+    }
+
+    fn write_checksum(page: &mut [u8; super::SIZE]) {
+        page[0] = integrity::crc(CRC_POLY, &page[1..]);
+    }
+
+    pub fn verify_checksum(page: &[u8; super::SIZE]) -> Result<(), integrity::Error> {
+        if page[0] == integrity::crc(CRC_POLY, &page[1..]) {
+            Ok(())
+        } else {
+            Err(integrity::Error::BadChecksum)
         }
     }
 
@@ -173,6 +190,7 @@ pub mod slot {
             blocks[0].size = 1034;
             let mut page = [0u8; page::SIZE];
             write_blocks(&mut page, &blocks);
+            assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
             assert_eq!(page[3..5], 1034u16.to_le_bytes());
             assert_eq!(page[5..7], 1234u16.to_le_bytes());
             assert_eq!(page[7..], [0u8; page::SIZE - 7]);
@@ -180,6 +198,7 @@ pub mod slot {
             blocks[2].offset = u16::MAX;
             blocks[2].size = u16::MAX;
             write_blocks(&mut page, &blocks);
+            assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
             assert_eq!(page[3..5], 1034u16.to_le_bytes());
             assert_eq!(page[5..7], 1234u16.to_le_bytes());
             assert_eq!(page[7..9], 0u16.to_le_bytes());
@@ -197,6 +216,7 @@ pub mod slot {
             }
             let mut page = [0u8; page::SIZE];
             write_blocks(&mut page, &blocks);
+            assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
             for (index, block) in blocks.iter_mut().enumerate() {
                 let mut offset = 3 + index * 4;
                 assert_eq!(page[offset..offset + 2], block.size.to_le_bytes());
@@ -211,6 +231,8 @@ pub mod slot {
             let mut blocks = [Block::default(); 5];
             let mut page = [0u8; page::SIZE];
             write_blocks(&mut page, &blocks);
+            // At this point all bytes should be zero'd out, which gives a
+            // checksum of zero as well.
             assert_eq!([0u8; page::SIZE], page);
         }
     }
