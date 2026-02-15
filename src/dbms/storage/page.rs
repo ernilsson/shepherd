@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     fs::File,
     io::{self, Read, Seek, Write},
 };
@@ -30,6 +31,189 @@ pub fn copy(file: &mut File, src: u64, dst: u64) -> io::Result<()> {
     let mut buf = [0u8; SIZE];
     read(file, src, &mut buf)?;
     write(file, dst, &buf)
+}
+
+pub mod slot {
+    use std::io;
+
+    type Index = u16;
+
+    #[derive(Default, Copy, Clone)]
+    struct Block {
+        offset: Index,
+        size: u16,
+    }
+
+    impl Block {
+        const SIZE: usize = 4;
+    }
+
+    fn read_blocks(page: &[u8; super::SIZE]) -> [Block; 5] {
+        const OFFSET: usize = 3;
+        let mut blocks = [Block::default(); 5];
+        for (index, block) in blocks.iter_mut().enumerate() {
+            let mut base = OFFSET + Block::SIZE * index;
+            block.size = u16::from_le_bytes(page[base..base + 2].try_into().unwrap());
+            base += 2;
+            block.offset = u16::from_le_bytes(page[base..base + 2].try_into().unwrap());
+        }
+        blocks
+    }
+
+    fn write_blocks(page: &mut [u8; super::SIZE], blocks: &[Block; 5]) {
+        const OFFSET: usize = 3;
+        for (index, block) in blocks.iter().enumerate() {
+            let mut base = OFFSET + Block::SIZE * index;
+            page[base..base + 2].copy_from_slice(&block.size.to_le_bytes());
+            base += 2;
+            page[base..base + 2].copy_from_slice(&block.offset.to_le_bytes());
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::dbms::storage::page;
+
+        use super::*;
+
+        #[test]
+        fn read_blocks_when_partially_filled() {
+            let mut page = [0u8; page::SIZE];
+            // Medium sized values.
+            page[3..5].copy_from_slice(&1265u16.to_le_bytes());
+            page[5..7].copy_from_slice(&4032u16.to_le_bytes());
+            // Small sized values.
+            page[7..9].copy_from_slice(&45u16.to_le_bytes());
+            page[9..11].copy_from_slice(&128u16.to_le_bytes());
+            // Max sized values.
+            page[11..13].copy_from_slice(&u16::MAX.to_le_bytes());
+            page[13..15].copy_from_slice(&u16::MAX.to_le_bytes());
+
+            let blocks = read_blocks(&page);
+            assert_eq!(blocks[0].size, 1265);
+            assert_eq!(blocks[0].offset, 4032);
+
+            assert_eq!(blocks[1].size, 45);
+            assert_eq!(blocks[1].offset, 128);
+
+            assert_eq!(blocks[2].size, u16::MAX);
+            assert_eq!(blocks[2].offset, u16::MAX);
+
+            // Remaining blocks should be zero'ed out.
+            for block in blocks[3..].iter() {
+                assert_eq!(block.size, 0);
+                assert_eq!(block.offset, 0);
+            }
+
+            // Single block.
+            let mut page = [0u8; page::SIZE];
+            page[3..5].copy_from_slice(&1265u16.to_le_bytes());
+            page[5..7].copy_from_slice(&4032u16.to_le_bytes());
+
+            let blocks = read_blocks(&page);
+            assert_eq!(blocks[0].size, 1265);
+            assert_eq!(blocks[0].offset, 4032);
+
+            // Remaining blocks should be zero'ed out.
+            for block in blocks[1..].iter() {
+                assert_eq!(block.size, 0);
+                assert_eq!(block.offset, 0);
+            }
+        }
+
+        #[test]
+        fn read_blocks_when_filled() {
+            let mut page = [0u8; page::SIZE];
+
+            page[3..5].copy_from_slice(&1265u16.to_le_bytes());
+            page[5..7].copy_from_slice(&4032u16.to_le_bytes());
+
+            page[7..9].copy_from_slice(&45u16.to_le_bytes());
+            page[9..11].copy_from_slice(&128u16.to_le_bytes());
+
+            page[11..13].copy_from_slice(&u16::MAX.to_le_bytes());
+            page[13..15].copy_from_slice(&u16::MAX.to_le_bytes());
+
+            page[15..17].copy_from_slice(&34444u16.to_le_bytes());
+            page[17..19].copy_from_slice(&12334u16.to_le_bytes());
+
+            page[19..21].copy_from_slice(&21123u16.to_le_bytes());
+            page[21..23].copy_from_slice(&0u16.to_le_bytes());
+
+            let blocks = read_blocks(&page);
+            assert_eq!(blocks[0].size, 1265);
+            assert_eq!(blocks[0].offset, 4032);
+
+            assert_eq!(blocks[1].size, 45);
+            assert_eq!(blocks[1].offset, 128);
+
+            assert_eq!(blocks[2].size, u16::MAX);
+            assert_eq!(blocks[2].offset, u16::MAX);
+
+            assert_eq!(blocks[3].size, 34444);
+            assert_eq!(blocks[3].offset, 12334);
+
+            assert_eq!(blocks[4].size, 21123);
+            assert_eq!(blocks[4].offset, 0);
+        }
+
+        #[test]
+        fn read_blocks_when_empty() {
+            let mut page = [0u8; page::SIZE];
+            for block in read_blocks(&page) {
+                assert_eq!(block.size, 0);
+                assert_eq!(block.offset, 0);
+            }
+        }
+
+        #[test]
+        fn write_blocks_when_partially_filled() {
+            let mut blocks = [Block::default(); 5];
+            blocks[0].offset = 1234;
+            blocks[0].size = 1034;
+            let mut page = [0u8; page::SIZE];
+            write_blocks(&mut page, &blocks);
+            assert_eq!(page[3..5], 1034u16.to_le_bytes());
+            assert_eq!(page[5..7], 1234u16.to_le_bytes());
+            assert_eq!(page[7..], [0u8; page::SIZE - 7]);
+
+            blocks[2].offset = u16::MAX;
+            blocks[2].size = u16::MAX;
+            write_blocks(&mut page, &blocks);
+            assert_eq!(page[3..5], 1034u16.to_le_bytes());
+            assert_eq!(page[5..7], 1234u16.to_le_bytes());
+            assert_eq!(page[7..9], 0u16.to_le_bytes());
+            assert_eq!(page[9..11], 0u16.to_le_bytes());
+            assert_eq!(page[11..13], u16::MAX.to_le_bytes());
+            assert_eq!(page[13..15], u16::MAX.to_le_bytes());
+        }
+
+        #[test]
+        fn write_blocks_when_filled() {
+            let mut blocks = [Block::default(); 5];
+            for (index, block) in blocks.iter_mut().enumerate() {
+                block.size = (index as u16 + 1) * 100;
+                block.offset = (index as u16 + 1) * 100;
+            }
+            let mut page = [0u8; page::SIZE];
+            write_blocks(&mut page, &blocks);
+            for (index, block) in blocks.iter_mut().enumerate() {
+                let mut offset = 3 + index * 4;
+                assert_eq!(page[offset..offset + 2], block.size.to_le_bytes());
+                offset += 2;
+                assert_eq!(page[offset..offset + 2], block.offset.to_le_bytes());
+            }
+            assert_eq!(page[3 + 4 * 5..], [0u8; page::SIZE - (3 + 4 * 5)]);
+        }
+
+        #[test]
+        fn write_blocks_when_empty() {
+            let mut blocks = [Block::default(); 5];
+            let mut page = [0u8; page::SIZE];
+            write_blocks(&mut page, &blocks);
+            assert_eq!([0u8; page::SIZE], page);
+        }
+    }
 }
 
 #[cfg(test)]
