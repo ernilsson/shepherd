@@ -36,7 +36,7 @@ pub fn copy(file: &mut File, src: u64, dst: u64) -> io::Result<()> {
 pub mod slot {
     use std::io;
 
-    use crate::dbms::storage::integrity;
+    use crate::dbms::storage::{integrity, page};
 
     type Index = u16;
 
@@ -50,6 +50,10 @@ pub mod slot {
 
     impl Block {
         const SIZE: usize = 4;
+
+        fn new(offset: Index, size: u16) -> Self {
+            Self { offset, size }
+        }
     }
 
     fn read_blocks(page: &[u8; super::SIZE]) -> [Block; 5] {
@@ -64,14 +68,13 @@ pub mod slot {
         blocks
     }
 
-    fn write_blocks(page: &mut [u8; super::SIZE], blocks: &[Block; 5]) {
-        const OFFSET: usize = 3;
-        for (index, block) in blocks.iter().enumerate() {
-            let mut base = OFFSET + Block::SIZE * index;
-            page[base..base + 2].copy_from_slice(&block.size.to_le_bytes());
-            base += 2;
-            page[base..base + 2].copy_from_slice(&block.offset.to_le_bytes());
+    fn write_block(page: &mut [u8; super::SIZE], index: usize, block: &Block) {
+        if index > 4 {
+            panic!("illegal block index {}", index);
         }
+        let offset = 3 + Block::SIZE * index;
+        page[offset..offset + 2].copy_from_slice(&block.size.to_le_bytes());
+        page[offset + 2..offset + 4].copy_from_slice(&block.offset.to_le_bytes());
         write_checksum(page);
     }
 
@@ -184,56 +187,66 @@ pub mod slot {
         }
 
         #[test]
-        fn write_blocks_when_partially_filled() {
-            let mut blocks = [Block::default(); 5];
-            blocks[0].offset = 1234;
-            blocks[0].size = 1034;
+        fn write_block_given_legal_index() {
             let mut page = [0u8; page::SIZE];
-            write_blocks(&mut page, &blocks);
-            assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
-            assert_eq!(page[3..5], 1034u16.to_le_bytes());
-            assert_eq!(page[5..7], 1234u16.to_le_bytes());
-            assert_eq!(page[7..], [0u8; page::SIZE - 7]);
+            page[3..5].copy_from_slice(&9999u16.to_le_bytes());
+            page[5..7].copy_from_slice(&1234u16.to_le_bytes());
+            write_block(&mut page, 1, &Block::new(1234, 1034));
 
-            blocks[2].offset = u16::MAX;
-            blocks[2].size = u16::MAX;
-            write_blocks(&mut page, &blocks);
             assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
-            assert_eq!(page[3..5], 1034u16.to_le_bytes());
+            assert_eq!(page[3..5], 9999u16.to_le_bytes());
             assert_eq!(page[5..7], 1234u16.to_le_bytes());
-            assert_eq!(page[7..9], 0u16.to_le_bytes());
-            assert_eq!(page[9..11], 0u16.to_le_bytes());
-            assert_eq!(page[11..13], u16::MAX.to_le_bytes());
-            assert_eq!(page[13..15], u16::MAX.to_le_bytes());
+            assert_eq!(page[7..9], 1034u16.to_le_bytes());
+            assert_eq!(page[9..11], 1234u16.to_le_bytes());
+            assert_eq!(page[11..], [0u8; page::SIZE - 11]);
+
+            write_block(&mut page, 3, &Block::new(8011, 65535));
+            assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
+            assert_eq!(page[3..5], 9999u16.to_le_bytes());
+            assert_eq!(page[5..7], 1234u16.to_le_bytes());
+            assert_eq!(page[7..9], 1034u16.to_le_bytes());
+            assert_eq!(page[9..11], 1234u16.to_le_bytes());
+            assert_eq!(page[11..13], 0u16.to_le_bytes());
+            assert_eq!(page[13..15], 0u16.to_le_bytes());
+            assert_eq!(page[15..17], 65535u16.to_le_bytes());
+            assert_eq!(page[17..19], 8011u16.to_le_bytes());
+            assert_eq!(page[19..], [0u8; page::SIZE - 19]);
+
+            write_block(&mut page, 3, &Block::default());
+            assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
+            assert_eq!(page[3..5], 9999u16.to_le_bytes());
+            assert_eq!(page[5..7], 1234u16.to_le_bytes());
+            assert_eq!(page[7..9], 1034u16.to_le_bytes());
+            assert_eq!(page[9..11], 1234u16.to_le_bytes());
+            assert_eq!(page[11..], [0u8; page::SIZE - 11]);
+
+            write_block(&mut page, 4, &Block::new(2222, 2121));
+            assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
+            assert_eq!(page[3..5], 9999u16.to_le_bytes());
+            assert_eq!(page[5..7], 1234u16.to_le_bytes());
+            assert_eq!(page[7..9], 1034u16.to_le_bytes());
+            assert_eq!(page[9..11], 1234u16.to_le_bytes());
+            assert_eq!(page[11..13], 0u16.to_le_bytes());
+            assert_eq!(page[13..15], 0u16.to_le_bytes());
+            assert_eq!(page[15..17], 0u16.to_le_bytes());
+            assert_eq!(page[17..19], 0u16.to_le_bytes());
+            assert_eq!(page[19..21], 2121u16.to_le_bytes());
+            assert_eq!(page[21..23], 2222u16.to_le_bytes());
+            assert_eq!(page[23..], [0u8; page::SIZE - 23]);
         }
 
         #[test]
-        fn write_blocks_when_filled() {
-            let mut blocks = [Block::default(); 5];
-            for (index, block) in blocks.iter_mut().enumerate() {
-                block.size = (index as u16 + 1) * 100;
-                block.offset = (index as u16 + 1) * 100;
-            }
+        #[should_panic = "illegal block index 5"]
+        fn write_block_given_illegal_index() {
             let mut page = [0u8; page::SIZE];
-            write_blocks(&mut page, &blocks);
-            assert_eq!(page[0], integrity::crc(CRC_POLY, &page[1..]));
-            for (index, block) in blocks.iter_mut().enumerate() {
-                let mut offset = 3 + index * 4;
-                assert_eq!(page[offset..offset + 2], block.size.to_le_bytes());
-                offset += 2;
-                assert_eq!(page[offset..offset + 2], block.offset.to_le_bytes());
-            }
-            assert_eq!(page[3 + 4 * 5..], [0u8; page::SIZE - (3 + 4 * 5)]);
+            write_block(&mut page, 5, &Block::default());
         }
 
         #[test]
-        fn write_blocks_when_empty() {
-            let mut blocks = [Block::default(); 5];
+        #[should_panic = "illegal block index 1100"]
+        fn write_block_given_very_illegal_index() {
             let mut page = [0u8; page::SIZE];
-            write_blocks(&mut page, &blocks);
-            // At this point all bytes should be zero'd out, which gives a
-            // checksum of zero as well.
-            assert_eq!([0u8; page::SIZE], page);
+            write_block(&mut page, 1100, &Block::default());
         }
     }
 }
